@@ -1,28 +1,37 @@
-import { BITBOX } from "bitbox-sdk";
+/*
 
-let claimOpreturnVersion = Buffer.from('0abcde1d', 'hex');
-let transactOpreturnVersion = Buffer.from('0abcde1e', 'hex');
-let rateOpreturnVersion = Buffer.from('0abcde1f', 'hex');
-let bigi = require('bigi')
+    simple rating and raputation system for BCH
 
+    version 0.1
 
-function createWallet(seed) {
+    mtrycz
+
+*/
+
+import {BITBOX} from "bitbox-sdk";
+let bitbox = new BITBOX()
+
+var claimOpreturnVersion      = Buffer.from('0abcde1d', 'hex');
+var transactOpreturnVersion   = Buffer.from('0abcde1e', 'hex');
+var rateOpreturnVersion       = Buffer.from('0abcde1f', 'hex');
+
+export function createWallet(seed) {
     seed = seed || bitbox.Mnemonic.fromEntropy(bitbox.Crypto.randomBytes(32));
     let seedBuffer = bitbox.Mnemonic.toSeed(seed)
     return bitbox.HDNode.fromSeed(seedBuffer);
 }
 
-async function getAnUtxo(anAddress, minAmount) {
+export async function getAnUtxo(anAddress, minAmount) {
     minAmount = minAmount || 1000;
     let utxos = await bitbox.Address.utxo(anAddress);
     let utxo = utxos.utxos.find(u => u.satoshis >= 1000);
     if (utxo)
         return utxo;
     else
-        throw "No suitable utxo for transaction";
+        throw "No suitable utxo for transaction. Send more funds.";
 }
 
-async function claimAddress(wallet, network) {
+export async function claimAddress(wallet, network) {
     network = network || 'mainnet';
     var transactionBuilder = new bitbox.TransactionBuilder(network);
     let redeemScript;
@@ -67,13 +76,10 @@ async function claimAddress(wallet, network) {
     return txid;
 }
 
-async function getClaimDetails(transactionId) {
+export async function getClaimDetails(transactionId) {
     var transaction = await bitbox.Transaction.details(transactionId);
     var opReturnOutput = transaction.vout.find(function(out) {return out.scriptPubKey.addresses === undefined;});
     var message = opReturnOutput.scriptPubKey.asm;
-    console.log(message);
-    fromAsm = bitbox.Script.fromASM(message);
-    decoded = bitbox.Script.decode(fromAsm);
 
     let result = {};
     result.version     = message.substring(10, 18);
@@ -91,7 +97,7 @@ async function getClaimDetails(transactionId) {
     return result;
 }
 
-async function transact(fromWallet, toWallet, amount, network) {
+export async function transact(fromWallet, toWallet, amount, network) {
     network = network || 'mainnet';
     var transactionBuilder = new bitbox.TransactionBuilder(network);
     let redeemScript;
@@ -117,16 +123,17 @@ async function transact(fromWallet, toWallet, amount, network) {
     return await bitbox.RawTransactions.sendRawTransaction(hex);
 }
 
-function createMessage(reviewee, reviewer, transactionId, rating) {
+export function createMessage(reviewee, reviewer, transactionId, rating) {
     var reviewee160 = Buffer.from(bitbox.Address.cashToHash160(reviewee), 'hex');
     var reviewer160 = Buffer.from(bitbox.Address.cashToHash160(reviewer), 'hex');
     var ratedTx     = Buffer.from(transactionId, 'hex');
+    rating          = rating.toString().length == 2 ? rating : "0"+rating;
     var rating      = Buffer.from(rating.toString(), 'hex');
     var message     = Buffer.concat([reviewee160, reviewer160, ratedTx, rating]);
     return message;
 }
 
-async function rateTransaction(reviewee, reviewer, transactionId, rating, wallet, network) {
+export async function rateTransaction(reviewee, reviewer, transactionId, rating, wallet, network) {
     network = network || 'mainnet';
     var transactionBuilder = new bitbox.TransactionBuilder(network)
     let redeemScript;
@@ -160,7 +167,7 @@ async function rateTransaction(reviewee, reviewer, transactionId, rating, wallet
     return await bitbox.RawTransactions.sendRawTransaction(hex);
 }
 
-async function checkRatedTransactionConditions(details) {
+export async function checkRatedTransactionConditions(details) {
     var ratedTransaction = await bitbox.Transaction.details(details.ratedTransaction);
     console.log(ratedTransaction);
 
@@ -183,13 +190,10 @@ async function checkRatedTransactionConditions(details) {
     }
 }
 
-async function getRatingDetails(transactionId) {
+export async function getRatingDetails(transactionId) {
     var transaction = await bitbox.Transaction.details(transactionId);
     var opReturnOutput = transaction.vout.find(function(out) {return out.scriptPubKey.addresses === undefined;});
     var message = opReturnOutput.scriptPubKey.asm;
-    console.log(message);
-    fromAsm = bitbox.Script.fromASM(message);
-    decoded = bitbox.Script.decode(fromAsm);
     
     let details = {};
     details.version     = message.substring(10, 18);
@@ -217,7 +221,82 @@ async function getRatingDetails(transactionId) {
     return details;
 }
 
-async function test() {
+export async function sendAllToCashAddress(wallet, toAddress, network) {
+    network = network || 'mainnet';
+    var transactionBuilder = new bitbox.TransactionBuilder(network)
+    var u = await bitbox.Address.utxo(bitbox.HDNode.toCashAddress(wallet));
+    var sendAmount = 0
+    var inputs = [];
+
+    // Loop through each UTXO assigned to this address.
+    for (let i = 0; i < u.utxos.length; i++) {
+        var thisUtxo = u.utxos[i]
+        inputs.push(thisUtxo)
+        sendAmount += thisUtxo.satoshis
+        transactionBuilder.addInput(thisUtxo.txid, thisUtxo.vout)
+    }
+
+    // get byte count to calculate fee. paying 1.2 sat/byte
+    var byteCount = bitbox.BitcoinCash.getByteCount(
+        { P2PKH: inputs.length },
+        { P2PKH: 1 }
+    )
+
+    if (sendAmount - byteCount < 0) {
+        console.log(
+        `Transaction fee costs more combined UTXOs. Can't send transaction.`
+        )
+        return
+    }
+
+    transactionBuilder.addOutput(toAddress, sendAmount - byteCount);
+
+    let redeemScript
+    inputs.forEach((input, index) => {
+    transactionBuilder.sign(
+        index,
+        wallet.keyPair,
+        redeemScript,
+        transactionBuilder.hashTypes.SIGHASH_ALL,
+        input.satoshis
+    )
+    });
+
+    var tx = transactionBuilder.build();
+    var hex = tx.toHex();
+    var txid = await bitbox.RawTransactions.sendRawTransaction([hex]);
+    return txid;
+}
+
+export async function getSimpleAverage(wallet, network) {
+    network = network || 'mainnet';
+
+
+    var cashAddress   = bitbox.HDNode.toCashAddress(wallet);
+    var hash160       = bitbox.Address.cashToHash160(cashAddress);
+    var toencode      = "0abcde1f" + hash160;
+    var prefix        = "^"+ Buffer.from(toencode, 'hex').toString('base64');
+
+
+    var query = {
+        "v": 3,
+        "q": {
+            "find": {
+                "out.b1": {
+                    "$regex": prefix
+                }
+            },
+            "limit": 999
+        },
+        "r": {
+            "f": "[ length as $array_length | reduce (.[] | .out[1] | .h1[152:154]  | tonumber) as $item (0; . + $item) / $array_length | tostring ]"
+        }
+    };
+
+    return bitbox.BitDB.get(query);
+}
+
+export async function test() {
     let wallet = createWallet('sponsor access milk want fossil govern plate head stuff session banner spice attract dentist dilemma public real common what jar mad world again online');
     let wallet2 = createWallet('excite orbit grit offer soon license city hybrid bring illness forward there false victory access input limb cement creek pumpkin source kitchen butter sea');
 
@@ -234,4 +313,3 @@ async function test() {
     return await getRatingDetails(rateTx);
 }
 
-test().then(console.log, console.log)
